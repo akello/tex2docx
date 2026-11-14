@@ -1,0 +1,170 @@
+"""Stage 4: write the fragment (and images), list what the main document must provide.
+
+Status: implemented (M0). The fragment never carries \\usepackage or \\newtheorem:
+needed packages go to the report (emit.package) and theorem environments used go to
+emit.newtheorem, for the author to check against the main preamble.
+Characters pdflatex cannot typeset are reported as unicode.pdflatex (code points only).
+--standalone additionally writes <out>.standalone.tex with a minimal preamble.
+M2: pictures in formats LaTeX cannot include are converted (BMP/TIFF/GIF -> PNG with
+Pillow; EMF/WMF -> PDF with LibreOffice when present, else images.unsupported).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from ..context import Context
+
+STAGE = "emit"
+PACKAGE_HINTS: list[tuple[str, str]] = [
+    (r"\\includegraphics", "graphicx"),
+    (r"\\begin\{(align|gather|multline|equation\*|cases|split|aligned|gathered|subequations"
+     r"|[pbBvV]?matrix)\b", "amsmath"),
+    (r"\\(mathbb|operatorname|text|boldsymbol|binom|[dt]frac|overset|underset|eqref|tag)\b",
+     "amsmath"),
+    (r"\\x(left|right)arrow\b", "amsmath"),
+    (r"\\(mathbb|mathfrak)\{", "amssymb"),
+    (r"\\(nleq|ngeq|nmid|nparallel|nsubseteq|nsupseteq|varnothing|leqslant|geqslant|lesssim"
+     r"|gtrsim|therefore|because|square|blacksquare|hslash|complement)\b", "amssymb"),
+    (r"\\(ul|st|hl|so)\{", "soul"),
+    (r"\\(toprule|midrule|bottomrule)", "booktabs"),
+    (r"\\begin\{proof\}|\\begin\{(theorem|lemma|definition|remark|corollary|proposition|example)\}", "amsthm"),
+    (r"\\begin\{algorithmic\}", "algpseudocode"),
+    (r"\\begin\{algorithm\}", "algorithm"),
+    (r"\\url\{|\\href\{|\\hyperref\[", "hyperref"),
+    (r"\\begin\{longtable\}", "longtable"),
+    (r"\\multirow", "multirow"),
+]
+# what pdflatex with T2A + utf8 typesets: ASCII, Latin-1 and Latin Extended-A, Cyrillic,
+# the usual punctuation (dashes, quotes, ellipsis), numero sign
+PDFLATEX_OK = re.compile(r"[\x00-\x7f\u00a0-\u017f\u0400-\u045f\u0490\u0491"
+                         r"\u2013\u2014\u2018\u2019\u201a\u201c\u201d\u201e\u2026\u2116]")
+
+
+def unsupported_chars(tex: str) -> list[str]:
+    """Code points pdflatex would stop on ("Unicode character ... not set up"), as U+XXXX."""
+    return sorted({f"U+{ord(c):04X}" for c in tex if not PDFLATEX_OK.match(c)})
+
+
+BABEL = {"russian": "russian", "ukrainian": "ukrainian", "english": "english"}
+
+
+def needed_packages(tex: str, macros: dict[str, str] | None = None) -> list[str]:
+    """Packages the fragment uses; folded macros (\\F for \\mathbb{F}) count with their bodies."""
+    used = [body for name, body in (macros or {}).items()
+            if re.search(re.escape(name) + r"(?![A-Za-z])", tex)]
+    tex = "\n".join([tex, *used])
+    out: list[str] = []
+    for pat, pkg in PACKAGE_HINTS:
+        if re.search(pat, tex) and pkg not in out:
+            out.append(pkg)
+    return out
+
+
+def standalone(ctx: Context) -> str:
+    lang = BABEL.get(ctx.language, "english")
+    pkgs = ["[T2A]{fontenc}", "[utf8]{inputenc}", f"[{lang}]{{babel}}"]
+    pkgs += ["{" + p + "}" for p in ctx.packages]
+    head = ["\\documentclass[12pt]{article}"] + ["\\usepackage" + p for p in pkgs]
+    for env, title in sorted(ctx.theorem_envs_used.items()):
+        head.append(f"\\newtheorem{{{env}}}{{{title}}}")
+    # macros folded back by normalize (the main document defines them; here we must)
+    for name, body in sorted({**ctx.sidecar.macros, **ctx.config.macros}.items()):
+        if re.search(re.escape(name) + r"(?![A-Za-z])", ctx.tex):
+            head.append(f"\\newcommand{{{name}}}{{{body}}}")
+    # the title block is commented out in the fragment (the main document has its own)
+    body = re.sub(r"^% (\\(?:title|author|date)\{)", r"\1", ctx.tex, flags=re.M)
+    return "\n".join(head) + "\n\\begin{document}\n" + body + "\\end{document}\n"
+
+
+RASTER_TO_PNG = {".bmp", ".tif", ".tiff", ".gif", ".webp"}
+VECTOR_TO_PDF = {".emf", ".wmf"}  # Word's own vector pictures: LibreOffice, if there is one
+
+
+def convert_image(src: Path, dest: Path, ctx: Context) -> str:
+    """Copy src into dest in a format LaTeX can include; returns the file name used."""
+    ext = src.suffix.lower()
+    if ext in RASTER_TO_PNG:
+        from tex2docx.stages.figures import to_png
+
+        target = dest / (src.stem + ".png")
+        if to_png(src, target):
+            ctx.report.info(STAGE, "images.converted", src.name)
+            return target.name
+    elif ext in VECTOR_TO_PDF:
+        soffice = shutil.which("soffice") or shutil.which("libreoffice")
+        if soffice:
+            try:
+                subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", str(dest), str(src)],
+                               capture_output=True, timeout=120, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if (dest / (src.stem + ".pdf")).is_file():
+                ctx.report.info(STAGE, "images.converted", src.name)
+                return src.stem + ".pdf"
+        ctx.report.warn(STAGE, "images.unsupported", src.name)
+    shutil.copyfile(src, dest / src.name)
+    return src.name
+
+
+def run(ctx: Context) -> None:
+    ctx.packages = needed_packages(ctx.tex, {**ctx.sidecar.macros, **ctx.config.macros})
+    for p in ctx.packages:
+        ctx.report.info(STAGE, "emit.package", p)
+    for env, title in ctx.theorem_envs_used.items():
+        ctx.report.info(STAGE, "emit.newtheorem", f"{env}:{title}")
+    if ctx.config.engine == "pdflatex":
+        for cp in unsupported_chars(ctx.tex):
+            ctx.report.warn(STAGE, "unicode.pdflatex", cp)
+    md = ctx.main_doc
+    if md is not None:  # --into: what the main document's preamble still lacks
+        for p in ctx.packages:
+            if p not in md.packages and not (p == "amsthm" and "amsthm" in md.text):
+                ctx.report.warn(STAGE, "into.missing-package", p)
+        for env, title in ctx.theorem_envs_used.items():
+            if env not in md.theorems:
+                ctx.report.warn(STAGE, "into.missing-theorem", f"{env}:{title}")
+        try:
+            rel = ctx.output.relative_to(md.path.parent).with_suffix("").as_posix()
+        except ValueError:
+            rel = ctx.output.with_suffix("").as_posix()
+        ctx.report.info(STAGE, "into.input", f"\\input{{{rel}}}")
+    ctx.output.parent.mkdir(parents=True, exist_ok=True)
+    media = ctx.workdir / "media"
+    image_paths: dict[str, str] = {}
+    if media.is_dir():
+        dest = ctx.output.parent / ctx.config.images_dir
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in sorted(media.rglob("*")):
+            if not f.is_file():
+                continue
+            # Convert each original separately: x.bmp and x.png can both become x.png.
+            with tempfile.TemporaryDirectory(dir=dest, prefix=".d2t-") as tmp:
+                scratch = Path(tmp)
+                converted = scratch / convert_image(f, scratch, ctx)
+                digest = hashlib.sha256(converted.read_bytes()).hexdigest()
+                name = digest + converted.suffix.lower()
+                # The name depends on the final bytes. A rerun or another fragment
+                # can share this path without changing the first fragment's image.
+                converted.replace(dest / name)
+            image_paths[f.name] = name
+    if image_paths:
+        pattern = re.compile(r"(?<=\{)" + re.escape(ctx.config.images_dir) + r"/([^{}]+)(?=\})")
+
+        def replace_image(match: re.Match[str]) -> str:
+            name = image_paths.get(match[1])
+            return f"{ctx.config.images_dir}/{name}" if name else match[0]
+
+        ctx.tex = pattern.sub(replace_image, ctx.tex)
+        ctx.report.info(STAGE, "emit.images", str(len(image_paths)))
+    if ctx.standalone:
+        sa = ctx.output.with_suffix(".standalone.tex")
+        sa.write_text(standalone(ctx), encoding="utf-8")
+        ctx.report.info(STAGE, "emit.standalone", sa.name)
+    ctx.output.write_text(ctx.tex, encoding="utf-8")
+    ctx.report.output_written = True
