@@ -36,6 +36,26 @@ tex2docx --check                     # все ли инструменты и п�
 pytest -q                            # сквозные тесты на корпусе
 ```
 
+### Windows после `git clone`
+
+Откройте PowerShell в папке клона, где лежит `pyproject.toml`. С Python 3.10 или новее
+и доступом в интернет выполните один раз:
+
+```powershell
+py -m pip install --user ".[images]"
+```
+
+Проверьте окружение и запустите конвертацию:
+
+```powershell
+py -m tex2docx --check
+py -m tex2docx "C:\papers\main.tex"
+```
+
+Если команда `py` недоступна, используйте `python`. Результат `main.docx` появится рядом с
+`main.tex`. Для обратного преобразования используйте `py -m docx2tex`. Установите Pandoc,
+TeX Live с `latexmk` и Poppler (`pdftoppm`) отдельно и добавьте их в `PATH`.
+
 Windows без интернета: `docs/windows-offline.md` — что скачать заранее (TeX Live ISO, pandoc,
 poppler, Python, колеса) и как поставить; `docs/windows-portable.md` — переносимая папка
 без установщиков и прав администратора, запуск через `tex2docx.bat`.
