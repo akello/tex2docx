@@ -15,7 +15,7 @@ from tex2docx.stages.figures import outermost_spans
 from tex2docx.stages.flatten import flatten_lines, flatten_text, read_source, source_encoding
 from tex2docx.stages.normalize import normalize_text, second_title_block
 from tex2docx.stages.macros import extract_definitions
-from tex2docx.stages.pandoc_run import collect_pandoc_messages
+from tex2docx.stages.pandoc_run import collect_pandoc_messages, proof_name
 from tex2docx.stages.postprocess import W, nbsp_text, process_document
 from tex2docx.stages.theorems import scan_decls, theorems_to_amsthm
 from tex2docx.texmf import expand_braces, package_requests
@@ -34,6 +34,8 @@ def test_read_group_nested_and_escaped():
 def test_strip_tex():
     assert strip_tex(r"\relax 1.2") == "1.2"
     assert strip_tex(r"\textup {(i)}") == "(i)"
+    assert strip_tex(r"{$\ast $}") == r"$\ast $"  # \tag{$\ast$}, stress run item 25
+    assert strip_tex(r"\textbf {A}$'$") == "A$'$"
 
 
 def test_blank_comment_lines_keeps_numbering():
@@ -58,6 +60,28 @@ def test_unwrap_log():
     long = "x" * 79
     assert unwrap_log(long + "\ntail\nnext") == [long + "tail", "next"]
     assert unwrap_log("a\nb") == ["a", "b"]
+
+
+def test_report_drops_absolute_dirs():
+    """Stress run, item 24: latex.log carried the work folder path with the user name."""
+    r = Report()
+    for detail in [
+        "/Users/ivan/Docs/wd2/check/main.tex:103: LaTeX Error: Unicode character",
+        "/Users/Ivan Petrov/My Docs/wd/main.tex:5: Undefined control sequence.",
+        r"C:\Users\Ivan Petrov\wd\main.tex:5: Undefined control sequence.",
+        "! LaTeX Error: File `/Users/Ivan Petrov/tex/foo.sty' not found.",
+    ]:
+        r.warn("latex", "latex.log", detail)
+    details = [i.detail for i in r.items]
+    assert details == [
+        "main.tex:103: LaTeX Error: Unicode character",
+        "main.tex:5: Undefined control sequence.",
+        "main.tex:5: Undefined control sequence.",
+        "! LaTeX Error: File `foo.sty' not found.",
+    ]
+    for keep in [r"! Undefined control sequence \foo\bar.", "images/fig.png", "lemma:Лемма"]:
+        r.warn("x", "y", keep)
+        assert r.items[-1].detail == keep
 
 
 # --- aux ---------------------------------------------------------------------
@@ -166,12 +190,60 @@ def test_flatten_include_macro(tmp_path: Path):
     assert len(lines) == len(origins)
 
 
+def test_flatten_empty_includeonly_keeps_input_and_subfile(tmp_path: Path):
+    (tmp_path / "a.tex").write_text("Included through input.", encoding="utf-8")
+    (tmp_path / "b.tex").write_text("Included through subfile.", encoding="utf-8")
+    src = (
+        "\\includeonly{}\n"
+        "\\begin{document}\n"
+        "\\include{missing}\n"
+        "\\input{a} \\subfile{b}\n"
+        "\\end{document}"
+    )
+    report = Report()
+
+    text = flatten_text(src, tmp_path, report)
+
+    assert "Included through input." in text
+    assert "Included through subfile." in text
+    assert r"\include" not in text
+    assert not report.items
+
+
+def test_flatten_includeonly_preserves_origin_and_ignores_comments(tmp_path: Path):
+    (tmp_path / "a.tex").write_text("Selected.", encoding="utf-8")
+    src = (
+        "\\includeonly{missing}\n"
+        "\\includeonly{\n"
+        "  a.tex % selected\n"
+        "} % \\includeonly{}\n"
+        "\\begin{document}\n"
+        "\\include{a} \\include{missing} Tail.\n"
+        "\\end{document}"
+    )
+    report = Report()
+
+    lines, origins = flatten_lines(src, tmp_path, report, "main.tex")
+
+    assert origins[lines.index("Selected.")] == ("a.tex", 1)
+    tail = next(i for i, line in enumerate(lines) if "Tail." in line)
+    assert origins[tail] == ("main.tex", 6)
+    assert r"\include{missing}" not in "\n".join(lines)
+    assert not report.items
+
+
 # --- normalize ---------------------------------------------------------------
 
 def test_babel_shorthands():
     assert normalize_text('код "--- это') == "код --- это"
     assert normalize_text('Шура"=Адамара') == "Шура-Адамара"
     assert normalize_text(r'\"o') == r'\"o'
+
+
+def test_qedhere_is_dropped():
+    # texmath does not know \qedhere: the formula would go as a picture
+    assert normalize_text("\\[ |C| \\le q^{n-d+1}. \\qedhere \\]") == "\\[ |C| \\le q^{n-d+1}.  \\]"
+    assert normalize_text("\\\\qedhere") == "\\\\qedhere"  # a line break, then text
 
 
 def test_normalize_guillemets_and_second_title():
@@ -309,6 +381,26 @@ def test_package_requests():
 
 # --- pandoc message collection ----------------------------------------------
 
+def test_proof_name(tmp_path: Path):
+    """Stress run, item 27: the proof heading was Russian in any language."""
+    def name(tex: str, **cfg) -> str:
+        ctx = Context(source=tmp_path / "m.tex", output=tmp_path / "m.docx",
+                      workdir=tmp_path, config=Config(**cfg))
+        ctx.tex = tex
+        return proof_name(ctx)
+    doc = "\\begin{document}\nText.\n\\end{document}\n"
+    assert name("\\usepackage[english]{babel}\n" + doc) == "Proof"
+    assert name("\\usepackage[english,russian]{babel}\n" + doc) == "Доказательство"
+    assert name("\\usepackage[ukrainian]{babel}\n" + doc) == "Доведення"
+    assert name("\\usepackage[russian]{babel}\n" + doc, proof_name="Док-во") == "Док-во"
+    renew = "\\usepackage[english]{babel}\n\\renewcommand{\\proofname}{Sketch}\n"
+    assert name(renew + doc) == "Sketch"
+    assert name(renew + "\\renewcommand\\proofname{Idea}\n" + doc) == "Idea"
+    assert name(renew.replace("Sketch", "\\textit{S}") + doc) == "Proof"  # macros: not ours
+    body = doc.replace("Text.", "\\renewcommand{\\proofname}{Later}")
+    assert name("\\usepackage[english]{babel}\n" + body) == "Proof"  # body: not followed
+
+
 def test_collect_pandoc_messages(tmp_path: Path):
     ctx = Context(source=tmp_path / "m.tex", output=tmp_path / "m.docx",
                   workdir=tmp_path, config=Config())
@@ -433,3 +525,128 @@ def test_autolabel_subequations_source_order():
     out, n = insert_labels(src, set())
     assert n == 2
     assert "\\begin{subequations}\\label{t2d:auto:1}\n\\begin{equation}\\label{t2d:auto:2} n" in out
+
+
+# --- sidecar (ADR 0008) --------------------------------------------------------
+
+def test_sidecar_round_trips_through_xml(tmp_path):
+    from tex2docx.sidecar import Sidecar
+
+    sc = Sidecar(source="main.tex", language="russian", profile="standard",
+                 names={"figure": "Рис.", "sep": "."},
+                 theorems={"theorem": {"title": "Теорема", "style": "plain", "numbered": "true"}},
+                 labels={"t2d_thm_main": "thm:main"}, label_kinds={"thm:main": "theorem"},
+                 macros={"\\matr": "\\mathbf"}, cites={"1": "knuth", "2": "lamport"})
+    path = Sidecar.path_for(tmp_path / "main.docx")
+    assert path.name == "main.t2d.xml"
+    sc.save(path)
+    back = Sidecar.load(path)
+    assert back == sc
+    assert "<cite key=\"knuth\" number=\"1\" />" in path.read_text(encoding="utf-8")
+
+
+def test_sidecar_embedded_in_docx_survives_without_the_file(tmp_path):
+    import shutil
+    import zipfile
+
+    from tex2docx.sidecar import Sidecar, embed, read_embedded
+
+    docx = tmp_path / "a.docx"
+    shutil.copyfile(Path(__file__).parents[1] / "src" / "tex2docx" / "data" / "reference.docx", docx)
+    sc = Sidecar(source="main.tex", labels={"t2d_eq_a": "eq:a"}, cites={"1": "knuth"})
+    part = embed(docx, sc)
+    assert part == "customXml/item1.xml"
+    assert read_embedded(docx) == sc
+    with zipfile.ZipFile(docx) as z:
+        names = z.namelist()
+        assert "customXml/itemProps1.xml" in names and "customXml/_rels/item1.xml.rels" in names
+        assert "/customXml/itemProps1.xml" in z.read("[Content_Types].xml").decode()
+        assert "../customXml/item1.xml" in z.read("word/_rels/document.xml.rels").decode()
+    # embedding again replaces the part instead of adding a second one
+    sc.cites["2"] = "lamport"
+    assert embed(docx, sc) == part
+    assert read_embedded(docx).cites == {"1": "knuth", "2": "lamport"}
+    with zipfile.ZipFile(docx) as z:
+        assert sum(1 for n in z.namelist() if n.startswith("customXml/item")) == 2
+
+
+# --- macros of the main document fold back (docx2tex M2) -----------------------
+
+def test_simple_macros_and_fold_back():
+    from docx2tex.stages.normalize import fold_macros
+    from tex2docx.stages.sidecar import simple_macros
+
+    tex = (r"\newcommand{\F}{\mathbb{F}} \newcommand{\wt}[1]{\operatorname{wt}(#1)}"
+           r" \DeclareMathOperator{\rank}{rank} \newcommand\matr{\mathbf} \renewcommand{\vect}{\mathbf}"
+           r" \newcommand{\eg}{e.g.}")
+    macros = simple_macros(tex)
+    assert macros == {"\\F": "\\mathbb{F}", "\\rank": "\\operatorname{rank}",
+                      "\\matr": "\\mathbf", "\\vect": "\\mathbf"}  # \wt has a parameter, \eg is text
+    out, n, ambiguous = fold_macros(r"$\mathbb{F}_q^n$, $\mathbf{G}x$, $\operatorname{rank}\mathbf{G}$, \mathbb{F}x",
+                                    macros)
+    assert out == r"$\F_q^n$, $\mathbf{G}x$, $\rank\mathbf{G}$, \F{}x"  # {} keeps the letter apart
+    assert n == 3
+    assert sorted(ambiguous) == ["\\matr", "\\vect"]  # two names, one body: left alone
+
+
+def test_docx2tex_normalize_drops_pandocbounded():
+    from docx2tex.stages.normalize import normalize_text
+
+    tex = r"знак \pandocbounded{\includegraphics[keepaspectratio]{media/image1.png}} в строке"
+    out = normalize_text(tex)
+    assert out == "знак \\includegraphics{images/image1.png} в строке\n"
+    assert normalize_text(out) == out  # idempotent
+
+
+def test_docx2tex_packages_of_folded_macros():
+    from docx2tex.stages.emit import needed_packages
+
+    macros = {"\\F": "\\mathbb{F}", "\\Lie": "\\mathfrak{g}"}
+    assert needed_packages(r"$\F_q^n$", macros) == ["amsmath", "amssymb"]
+    assert needed_packages(r"$\Fq$", macros) == []  # another name, not \F
+    assert needed_packages(r"\ul{x} $\begin{pmatrix} 1 \end{pmatrix}$") == ["amsmath", "soul"]
+
+
+def test_docx2tex_unsupported_chars_for_pdflatex():
+    from docx2tex.stages.emit import unsupported_chars
+
+    assert unsupported_chars("Текст — «елка» ü № … $x \\leq y$") == []
+    assert unsupported_chars("$A ⊄ B$, −5, α") == ["U+03B1", "U+2212", "U+2284"]
+
+
+# --- docx2tex --into: the main document and its .bib (M3) ----------------------
+
+def test_bib_parse_and_match():
+    from docx2tex.bibtex import match_entry, parse_bib
+
+    entries = parse_bib(r"""
+    @book{knuth2000, author = {Кнут, Дональд}, title = {Искусство программирования}, year = {2000}}
+    @article{lamport1978, author = "Lamport, Leslie and Other, A.", title = {Time, clocks, and the
+      ordering of events in a distributed system}, year = 1978, pages = {558--565}}
+    @comment{ignored}
+    """)
+    assert [e.key for e in entries] == ["knuth2000", "lamport1978"]
+    assert entries[1].surname == "Lamport" and entries[1].year == "1978"
+    assert match_entry("Кнут Д. Искусство программирования. М.: Вильямс, 2000.", entries).key == "knuth2000"
+    assert match_entry("Lamport L. Time, clocks and the ordering... 1978", entries).key == "lamport1978"
+    assert match_entry("Lamport L. Something else // Comm. ACM. 1978.", entries).key == "lamport1978"
+    assert match_entry("Иванов И. Неизвестная работа. 2010.", entries) is None
+
+
+def test_read_main_document(tmp_path):
+    from docx2tex.maindoc import read_main
+
+    (tmp_path / "refs.bib").write_text("@misc{a1, title={Alpha beta gamma}, year={2001}}", encoding="utf-8")
+    main = tmp_path / "main.tex"
+    main.write_text(r"""\documentclass{article}
+\usepackage[T2A]{fontenc}\usepackage[utf8]{inputenc}\usepackage[russian]{babel}
+\usepackage{amsmath,amsthm}
+\newtheorem{claim}{Утверждение}[section]
+\newcommand{\F}{\mathbb{F}}
+\begin{document}\bibliography{refs}\end{document}""", encoding="utf-8")
+    md = read_main(main)
+    assert md.theorems["claim"]["title"] == "Утверждение" and md.theorems["claim"]["within"] == "section"
+    assert md.macros == {"\\F": "\\mathbb{F}"}
+    assert {"amsmath", "amsthm", "babel"} <= md.packages
+    assert md.language == "russian"
+    assert [e.key for e in md.bib_entries] == ["a1"]

@@ -1,0 +1,22 @@
+# Глава, набранная в Word: стили по умолчанию, прямое форматирование, OMML, список, таблица, картинка.
+tex_contains:
+  - "\\section{Глава соавтора}"
+  - "\\textbf{полужирным}"
+  - "\\emph{курсивом}"
+  - "$x^{2}$"                        # OMML -> LaTeX через texmath (точный вид — по pandoc)
+  - "\\begin{itemize}"
+  - "\\begin{enumerate}"
+  - "\\begin{tabular}"
+  - "\\includegraphics{images/"
+  - "\\[\n  \\sum_{i = 1}^{n}x_{i}\n\\]"   # абзац из одной формулы -> выносная
+  - "$x^{2}$ --- и дальше"           # тире Word -> ---
+  - "\\caption{Подпись к рисунку}"   # абзац стиля Caption после картинки -> figure (M1)
+  - "\\begin{figure}"
+tex_not_contains:
+  - "\\usepackage"                   # фрагмент без преамбулы
+  - "\\\\\\\\"                         # ручных переносов строк нет
+compiles: true
+packages: [graphicx]
+report_absent:
+  - math.not-omml
+  - internal-error

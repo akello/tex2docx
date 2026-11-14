@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import tempfile
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,8 +22,10 @@ from .stages import (
     normalize,
     pandoc_run,
     postprocess,
+    sidecar,
     theorems,
 )
+from .tools import create_workdir
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ STAGES: list[Stage] = [
     Stage("figures", figures.run, fatal=False),
     Stage("pandoc", pandoc_run.run, fatal=True),
     Stage("postprocess", postprocess.run, fatal=True),
+    Stage("sidecar", sidecar.run, fatal=False),
 ]
 
 
@@ -55,8 +57,7 @@ def convert(source: Path, output: Path, config: Config | None = None, *,
     source = source.resolve()
     output = output.resolve()
     own_tmp = workdir is None
-    wd = Path(tempfile.mkdtemp(prefix="t2d-")) if own_tmp else workdir.resolve()
-    wd.mkdir(parents=True, exist_ok=True)
+    wd = create_workdir(workdir, "t2d-")
 
     ctx = Context(source=source, output=output, workdir=wd, config=config)
     try:

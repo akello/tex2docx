@@ -1,11 +1,11 @@
 ﻿# Собирает переносимую папку tex2docx-portable\ (без установки и прав администратора):
-#   python\   — Python embeddable + пакеты из колес, tex2docx внутри site-packages
+#   python\   — Python embeddable + пакеты из колес, tex2docx и docx2tex внутри site-packages
 #   pandoc\   — pandoc.exe из zip
 #   poppler\  — pdftoppm.exe и его DLL из zip poppler-windows
 #   texlive\  — сюда отдельно ставится TeX Live с ключом -portable (см. docs/windows-portable.md)
-#   tex2docx.bat — запуск
+#   tex2docx.bat, docx2tex.bat — запуск
 # Запускать на компьютере с интернетом из корня репозитория (PowerShell 5+):
-#   .\scripts\portable\make-portable.ps1 -PythonVersion 3.12.7 -PandocZip pandoc-3.x-windows-x86_64.zip -PopplerZip Release-xx.yy.z-0.zip
+#   .\scripts\portable\make-portable.ps1 -PythonVersion 3.12.7 -PandocZip pandoc-3.x-windows-x86_64.zip -PopplerZip Release-xx.yy.z-0.zip [-Out C:\soft\tex2docx-portable]
 param(
     [string]$PythonVersion = "3.12.7",
     [Parameter(Mandatory = $true)][string]$PandocZip,
@@ -14,7 +14,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$out = Join-Path (Get-Location) $Out
+$out = if ([System.IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path (Get-Location) $Out }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 # 1. Python embeddable
@@ -44,8 +44,14 @@ Get-ChildItem $wheels -Filter *.whl | ForEach-Object {
 }
 Remove-Item $wheels -Recurse
 
-# 3. tex2docx itself
-Copy-Item (Join-Path $root "src\tex2docx") (Join-Path $site "tex2docx") -Recurse -Force
+# 3. tex2docx and docx2tex themselves
+# Copy-Item into an existing folder would nest the package inside the old copy: remove first
+foreach ($pkg in @("tex2docx", "docx2tex")) {
+    $dest = Join-Path $site $pkg
+    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+    Copy-Item (Join-Path $root "src\$pkg") $dest -Recurse -Force
+    Get-ChildItem $dest -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
+}
 Copy-Item (Join-Path $root "examples") (Join-Path $out "examples") -Recurse -Force
 Copy-Item (Join-Path $root "docs\windows-portable.md") $out -Force
 
@@ -64,5 +70,6 @@ Remove-Item (Join-Path $out "poppler-tmp") -Recurse
 
 # 5. запуск
 Copy-Item (Join-Path $PSScriptRoot "tex2docx.bat") $out -Force
+Copy-Item (Join-Path $PSScriptRoot "docx2tex.bat") $out -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $out "texmf-home") | Out-Null
 Write-Host "Done: $out. Now install TeX Live into $out\texlive (install-tl-windows.bat -portable)."
