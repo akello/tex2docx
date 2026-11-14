@@ -190,6 +190,48 @@ def test_flatten_include_macro(tmp_path: Path):
     assert len(lines) == len(origins)
 
 
+def test_flatten_empty_includeonly_keeps_input_and_subfile(tmp_path: Path):
+    (tmp_path / "a.tex").write_text("Included through input.", encoding="utf-8")
+    (tmp_path / "b.tex").write_text("Included through subfile.", encoding="utf-8")
+    src = (
+        "\\includeonly{}\n"
+        "\\begin{document}\n"
+        "\\include{missing}\n"
+        "\\input{a} \\subfile{b}\n"
+        "\\end{document}"
+    )
+    report = Report()
+
+    text = flatten_text(src, tmp_path, report)
+
+    assert "Included through input." in text
+    assert "Included through subfile." in text
+    assert r"\include" not in text
+    assert not report.items
+
+
+def test_flatten_includeonly_preserves_origin_and_ignores_comments(tmp_path: Path):
+    (tmp_path / "a.tex").write_text("Selected.", encoding="utf-8")
+    src = (
+        "\\includeonly{missing}\n"
+        "\\includeonly{\n"
+        "  a.tex % selected\n"
+        "} % \\includeonly{}\n"
+        "\\begin{document}\n"
+        "\\include{a} \\include{missing} Tail.\n"
+        "\\end{document}"
+    )
+    report = Report()
+
+    lines, origins = flatten_lines(src, tmp_path, report, "main.tex")
+
+    assert origins[lines.index("Selected.")] == ("a.tex", 1)
+    tail = next(i for i, line in enumerate(lines) if "Tail." in line)
+    assert origins[tail] == ("main.tex", 6)
+    assert r"\include{missing}" not in "\n".join(lines)
+    assert not report.items
+
+
 # --- normalize ---------------------------------------------------------------
 
 def test_babel_shorthands():

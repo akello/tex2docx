@@ -13,7 +13,7 @@ main.tex ─► flatten ─► autolabel ─► latex ─────► theorem
 
 | Этап | Файл | Что делает | Статус |
 |---|---|---|---|
-| flatten | `stages/flatten.py` | склейка `\input`/`\include`, пустые строки вместо строк-комментариев | готов |
+| flatten | `stages/flatten.py` | склейка `\input`/`\include`, учет `\includeonly` из преамбулы | готов |
 | autolabel | `stages/autolabel.py` | `\label{t2d:auto:N}` для нумеруемых объектов без метки | готов |
 | latex | `stages/latex_compile.py` | latexmk → `.aux` → `ctx.labels` | готов |
 | theorems | `stages/theorems.py` | `\newtheorem`, `\theoremstyle`, `\declaretheorem` → `ctx.theorems` | готов (amsthm, thmtools, ntheorem) |
