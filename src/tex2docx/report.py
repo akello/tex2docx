@@ -46,6 +46,7 @@ class Report:
         # tex2docx writes <base>.report.*, other tools <base>.<tool>.report.*: run in one
         # folder, docx2tex (a.docx -> a.tex) must not overwrite the report of tex2docx.
         self.tool = tool
+        self.output_written = False  # the primary output was produced by this run
         self.items: list[Item] = []
         # Set by the flatten stage: origin of each line of the flattened source.
         self.line_map: list[tuple[str, int]] = []

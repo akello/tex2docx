@@ -20,7 +20,7 @@ from ..bibliography import ABSTRACT_TITLES, BIB_TITLES, KEYWORDS_TITLES, bib_fil
 from ..context import Context
 from ..texmf import personal_packages
 from ..texscan import document_language, read_group
-from ..tools import ToolError, require
+from ..tools import ToolError, pandoc_failure, require
 from ..tools import run as run_tool
 from . import StageError, mathimg
 
@@ -149,8 +149,8 @@ def _pkg_path(*parts: str) -> Path:
 
 
 def _skipped_command(snippet: str) -> str:
-    m = re.match(r"\\(?:begin|end)\{[^}]+\}|\\[A-Za-z@]+\*?|\\.", snippet)
-    return m.group(0) if m else snippet[:20]
+    m = re.match(r"\\(?:begin|end)\{[A-Za-z0-9@*_.:-]+\}|\\[A-Za-z@]+\*?|\\.", snippet)
+    return m.group(0) if m else "?"
 
 
 def collect_pandoc_messages(stderr: str, input_name: str, ctx: Context) -> None:
@@ -256,6 +256,5 @@ def run(ctx: Context) -> None:
 
     collect_pandoc_messages(proc.stderr, inp.name, ctx)
     if proc.returncode != 0 or not out.exists():
-        tail = proc.stderr.strip().splitlines()[-1:] or ["no output"]
-        raise StageError("pandoc.failed", tail[0][:200])
+        raise StageError("pandoc.failed", pandoc_failure(proc))
     ctx.docx = out
